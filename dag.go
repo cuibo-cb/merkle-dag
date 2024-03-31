@@ -5,6 +5,8 @@ import (
 	"hash"
 )
 
+const BlobSize = 262144
+
 type Link struct {
 	Name string
 	Hash []byte
@@ -17,76 +19,127 @@ type Object struct {
 }
 
 func Add(store KVStore, node Node, h hash.Hash) []byte {
-	switch node.Type() {
-	case DIR:
+
+	if node.Type() == FILE {
 		file := node.(File)
-		tmp := StoreFile(store, file, h)
-		jsonMarshal, _ := json.Marshal(tmp)
-		hash := calculateHash(jsonMarshal, h)
-		return hash
-	case FILE:
+		fileSlice := addBlock(file.Bytes(), store, h)
+		jsonData, _ := json.Marshal(fileSlice)
+		h.Write(jsonData)
+		return h.Sum(nil)
+	} else {
 		dir := node.(Dir)
-		tmp := StoreDir(store, dir, h)
-		jsonMarshal, _ := json.Marshal(tmp)
-		hash := calculateHash(jsonMarshal, h)
-		return hash
+		dirSlice := addDir(dir, store, h)
+		jsonData, _ := json.Marshal(dirSlice)
+		h.Write(jsonData)
+		return h.Sum(nil)
 	}
-	panic("unknown node")
 }
 
-func calculateHash(data []byte, h hash.Hash) []byte {
-	h.Reset()
-	hash := h.Sum(data)
-	h.Reset()
-	return hash
-}
-
-func StoreFile(store KVStore, file File, h hash.Hash) *Object {
-	data := file.Bytes()
-	blob := Object{Data: data, Links: nil}
-	jsonMarshal, _ := json.Marshal(blob)
-	hash := calculateHash(jsonMarshal, h)
-	store.Put(hash, data)
-	return &blob
-}
-
-func StoreDir(store KVStore, dir Dir, h hash.Hash) *Object {
-	it := dir.It()
-	treeObject := &Object{}
-	for it.Next() {
-		n := it.Node()
-		switch n.Type() {
-		case FILE:
-			file := n.(File)
-			tmp := StoreFile(store, file, h)
-			jsonMarshal, _ := json.Marshal(tmp)
-			hash := calculateHash(jsonMarshal, h)
-			treeObject.Links = append(treeObject.Links, Link{
-				Hash: hash,
+func addDir(store KVStore, node Dir, h hash.Hash) *Object {
+	iter := node.It()
+	tree := &Object{}
+	for iter.Next() {
+		elem := iter.Node()
+		if elem.Type() == FILE {
+			file := elem.(File)
+			fileSlice := addBlock(file.Bytes(), store, h)
+			jsonData, _ := json.Marshal(fileSlice)
+			h.Reset()
+			h.Write(jsonData)
+			tree.Links = append(tree.Links, Link{
+				Hash: h.Sum(nil),
 				Size: int(file.Size()),
 				Name: file.Name(),
 			})
-			typeName := "link"
-			if tmp.Links == nil {
-				typeName = "blob"
+			elemType := "link"
+			if fileSlice.Links == nil {
+				elemType = "data"
 			}
-			treeObject.Data = append(treeObject.Data, []byte(typeName)...)
-		case DIR:
-			dir := n.(Dir)
-			tmp := StoreDir(store, dir, h)
-			jsonMarshal, _ := json.Marshal(tmp)
-			hash := calculateHash(jsonMarshal, h)
-			treeObject.Links = append(treeObject.Links, Link{
-				Hash: hash,
+			tree.Data = append(tree.Data, []byte(elemType)...)
+		} else {
+			dir := elem.(Dir)
+			dirSlice := addDir(dir, store, h)
+			jsonData, _ := json.Marshal(dirSlice)
+			h.Reset()
+			h.Write(jsonData)
+			tree.Links = append(tree.Links, Link{
+				Hash: h.Sum(nil),
 				Size: int(dir.Size()),
 				Name: dir.Name(),
 			})
-			typeName := "tree"
-			treeObject.Data = append(treeObject.Data, []byte(typeName)...)
+			elemType := "tree"
+			tree.Data = append(tree.Data, []byte(elemType)...)
 		}
 	}
-	jsonMarshal, _ := json.Marshal(treeObject)
-	hash := calculateHash(jsonMarshal, h)
-	store.Put(hash, jsonMarshal)
-	return treeObject
+	jsonData, _ := json.Marshal(tree)
+	h.Reset()
+	h.Write(jsonData)
+	exists, _ := store.Has(h.Sum(nil))
+	if !exists {
+		store.Put(h.Sum(nil), jsonData)
+	}
+	return tree
+}
+
+func addBlock(data []byte, store KVStore, h hash.Hash) Object {
+	slips := ChunkData(data, BlobSize)
+	var links []Link
+	var Size = 0
+	for i := range slips {
+		_, blobHash := addSingleBlob(slips[i], store, h)
+		links = append(links, Link{
+			Name: string(blobHash),
+			Hash: blobHash,
+			Size: len(slips[i]),
+		})
+		Size += len(slips[i])
+	}
+	res := Object{
+		Links: links,
+		Data:  nil,
+	}
+	marshal, err := json.Marshal(res)
+	if err != nil {
+		return Object{nil, nil}
+	}
+	has := h.Sum(marshal)
+	ifhave, err := store.Has(has)
+	if err != nil {
+		return Object{}
+	}
+	if !ifhave {
+		store.Put(has, marshal)
+	}
+	return res
+}
+
+// ChunkData 分片
+func ChunkData(data []byte, chunkSize int) [][]byte {
+	var chunks [][]byte
+
+	for i := 0; i < len(data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		chunk := data[i:end]
+		chunks = append(chunks, chunk)
+	}
+
+	return chunks
+}
+
+func addSingleBlob(data []byte, store KVStore, h hash.Hash) (Object, []byte) {
+	bytes := h.Sum(data)
+	has, err := store.Has(bytes)
+	if err != nil {
+		return Object{}, nil
+	}
+	if !has {
+		err := store.Put(bytes, data)
+		if err != nil {
+			return Object{}, nil
+		}
+	}
+	return Object{Data: data}, bytes
 }
