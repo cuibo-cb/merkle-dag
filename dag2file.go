@@ -5,8 +5,11 @@ import (
 	"strings"
 )
 
-const STEP = 4 //字母长度 data tree link均为4字节
+const STEP = 4
 
+// Hash to file
+
+// example a path : /doc/tmp/temp.txt
 func Hash2File(store KVStore, hash []byte, path string, hp HashPool) []byte {
 	// 根据hash和path， 返curObjBinary回对应的文件, hash对应的类型是tree
 	flag, _ := store.Has(hash)
@@ -33,17 +36,17 @@ func getFileByDir(obj *Object, pathArr []string, cur int, store KVStore) []byte 
 			continue
 		}
 		switch objType {
-		case "tree":
+		case TREE:
 			objDirBinary, _ := store.Get(objInfo.Hash)
 			objDir := binaryToObj(objDirBinary)
 			ans := getFileByDir(objDir, pathArr, cur+1, store)
 			if ans != nil {
 				return ans
 			}
-		case "data":
+		case BLOB:
 			ans, _ := store.Get(objInfo.Hash)
 			return ans
-		case "list":
+		case LIST:
 			objLinkBinary, _ := store.Get(objInfo.Hash)
 			objList := binaryToObj(objLinkBinary)
 			ans := getFileByList(objList, store)
@@ -62,7 +65,7 @@ func getFileByList(obj *Object, store KVStore) []byte {
 		curObjLink := obj.Links[i]
 		curObjBinary, _ := store.Get(curObjLink.Hash)
 		curObj := binaryToObj(curObjBinary)
-		if curObjType == "data" {
+		if curObjType == BLOB {
 			ans = append(ans, curObjBinary...)
 		} else { //List
 			tmp := getFileByList(curObj, store)
